@@ -31,6 +31,15 @@ Measured on the test machine in `README.md`. Each entry names the build and what
 - So a fault there means **one registered thread has not beaten for 300 s**. The kill is the symptom;
   the hung thread is the bug. Not yet known: which row/thread, and what it waits on.
 
+### The GPU hangs right before the watchdog fires
+- Run `nowd-1` (`XCL_PATCH` on `+0x23cf683`): `D3D12 device removed: 0x887a0006` (DXGI_ERROR_DEVICE_HUNG) at
+  314.986 s, the watchdog's null write at 314.988 s. Run `psowait200-1`: device removed at 102.7 s.
+- So the thread the watchdog names is most likely the render thread waiting on a hung GPU, not a CPU-side
+  deadlock. Hypothesis (not verified here): a translated shader loop that never ends. Five Star Recomp
+  (GPL-3.0, ideas only) reports the same class of hang in this title and bounds it.
+- XCL has no general loop iteration bound in translated shaders (only the split-wave64 `s_barrier` spin,
+  upstream #798, already in `main`), and no open upstream PR for one (searched 2026-11-24).
+
 ### Mesh pipelines
 - `main` refuses ~40 mesh pipelines whose console MS sits in the AS slot (no MS subobject). PR #541
   translates them; with it, 0 refused and the picture is unchanged.
