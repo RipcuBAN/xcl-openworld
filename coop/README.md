@@ -41,10 +41,15 @@ Windows 10's inbox D3D12 stops at SM 6.5, so the D3D12 Agility SDK 1.620.2 `D3D1
 
 ```powershell
 cargo build --release --workspace
-# optional diagnostic: keep the title's stall watchdog from ending the process
+# NVIDIA / wave32 GPUs: real group barriers instead of split-wave64 spin waits (the spins hung the GPU)
+$env:XCL_WAVE64_SPIN = '0'
+# keep the title's stall watchdog from ending the process (until the loading stall is fixed)
 $env:XCL_PATCH = '0x23cf683:c704250000000021d48b4d:9090909090909090909090;0x2215bdc:732e:9090'
 target\release\xcl.exe run <game folder>\game_scarlett_master.exe
 ```
+
+With these two the title runs 10 min at 30 fps on the test machine (twice) and waits at the profile
+selector for **A** (Enter on the keyboard, with the game window focused).
 
 Logs and `report.json`: `%LOCALAPPDATA%\XCL\<title>\logs\`. `XCL_FRAME_DUMP=N` dumps every Nth frame there.
 
