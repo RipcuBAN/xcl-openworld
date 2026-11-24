@@ -40,6 +40,21 @@ Measured on the test machine in `README.md`. Each entry names the build and what
 - XCL has no general loop iteration bound in translated shaders (only the split-wave64 `s_barrier` spin,
   upstream #798, already in `main`), and no open upstream PR for one (searched 2026-11-24).
 
+### The GPU hang is the split-wave64 spin waits (NVIDIA, wave32)
+- Translated loops are already bounded (`LOOP_GUARD`, `xcl_budget = 1u << 16`); the split-wave64 meet and
+  the safe `s_barrier` spin up to `1u << 20` atomic polls each. Before every hang the fps fell 30 → 21 → 16 → 13,
+  then `0x887a0006` – consistent with spins growing past Windows' 2 s TDR (`TdrDelay` unset here = 2 s).
+- `XCL_WAVE64_SPIN=0` (real group barriers instead of spin waits) + both watchdog patches: **600 s, 17 700
+  frames, steady 30 fps, no device removal, no fault** (run `nospin-1`). Before: device removed or watchdog
+  at 100–315 s on every run.
+- `XCL_DRED=1` is not usable here: with it the title froze at 9 s (no log line for 9 min).
+- `XCL_WAVE64_SPIN=0` **without** watchdog patches: watchdog at 262 s, still 0 device removals – so a
+  second, CPU-side stall remains (task 2). Frame dumps: profile selector at ~50 s, story-loading art at
+  ~200 s. One DirectStorage request failed in that run (`0x89240009`, 128 KiB of
+  `data\ttdb\props\octa_imposters.ttpf` at 206 s); it did not recur in the next run (traced, 0 failures).
+- With both patches + `XCL_WAVE64_SPIN=0` (run `dsdiag-1`): 600 s, 17 700 frames, the title sits at the
+  **profile selector waiting for A** – no run so far had any input, so nothing past it was reached.
+
 ### Mesh pipelines
 - `main` refuses ~40 mesh pipelines whose console MS sits in the AS slot (no MS subobject). PR #541
   translates them; with it, 0 refused and the picture is unchanged.
