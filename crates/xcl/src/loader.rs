@@ -331,6 +331,54 @@ unsafe extern "system" fn main_thread(param: *mut c_void) -> u32 {
     f(peb() as *mut c_void)
 }
 
+/// `XCL_PATCH=<rva>:<old hex>:<new hex>[;…]`: one byte patch per entry in the main image, made
+/// only when the bytes there are `old` (a different build is left alone). A local diagnostic, e.g.
+/// to keep a title's watchdog from ending the process.
+fn parse_patches(spec: &str) -> Result<Vec<(usize, Vec<u8>, Vec<u8>)>, String> {
+    let hex = |s: &str| -> Result<Vec<u8>, String> {
+        let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+        if s.len() % 2 != 0 {
+            return Err(format!("odd hex length in {s:?}"));
+        }
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| format!("{s:?}: {e}"))).collect()
+    };
+    spec.split(';').filter(|e| !e.trim().is_empty()).map(|e| {
+        let parts: Vec<&str> = e.trim().split(':').collect();
+        let [rva, old, new] = parts[..] else { return Err(format!("{e:?}: want <rva>:<old>:<new>")) };
+        let rva = usize::from_str_radix(rva.trim_start_matches("0x"), 16).map_err(|x| format!("{rva:?}: {x}"))?;
+        let (old, new) = (hex(old)?, hex(new)?);
+        if old.len() != new.len() || old.is_empty() {
+            return Err(format!("{e:?}: old and new must be the same non-zero length"));
+        }
+        Ok((rva, old, new))
+    }).collect()
+}
+
+unsafe fn apply_patches(m: &Arc<MappedModule>, spec: &str) {
+    use windows_sys::Win32::System::Memory::{VirtualProtect, PAGE_EXECUTE_READWRITE};
+    let patches = match parse_patches(spec) {
+        Ok(p) => p,
+        Err(e) => return crate::xlog_warn!("XCL_PATCH ignored: {e}"),
+    };
+    for (rva, old, new) in patches {
+        if rva.checked_add(old.len()).map_or(true, |end| end > m.size) {
+            crate::xlog_warn!("XCL_PATCH {rva:#x}: outside the image ({:#x} bytes)", m.size);
+            continue;
+        }
+        let at = (m.base + rva) as *mut u8;
+        let here = std::slice::from_raw_parts(at, old.len());
+        if here != old.as_slice() {
+            crate::xlog_warn!("XCL_PATCH {rva:#x}: bytes there are {here:02x?}, not {old:02x?} – not patched");
+            continue;
+        }
+        let mut prev = 0u32;
+        VirtualProtect(at as *const c_void, new.len(), PAGE_EXECUTE_READWRITE, &mut prev);
+        std::ptr::copy_nonoverlapping(new.as_ptr(), at, new.len());
+        VirtualProtect(at as *const c_void, new.len(), prev, &mut prev);
+        crate::xlog_info!("XCL_PATCH {rva:#x}: {} bytes patched", new.len());
+    }
+}
+
 /// Make the game the "main image" of the process and run its entry point on a thread
 /// with the stack size its PE header asks for. Usually never returns (the game calls
 /// ExitProcess); if the entry returns, its value is returned.
@@ -339,6 +387,9 @@ pub fn run_main(m: &Arc<MappedModule>) -> u32 {
     use windows_sys::Win32::System::Threading::{
         CreateThread, GetExitCodeThread, WaitForSingleObject, INFINITE, STACK_SIZE_PARAM_IS_A_RESERVATION,
     };
+    if let Ok(spec) = std::env::var("XCL_PATCH") {
+        unsafe { apply_patches(m, &spec) };
+    }
     unsafe {
         // PEB.ImageBaseAddress → GetModuleHandle(NULL), resources with NULL module, …
         if crate::util::under_wine() {
@@ -422,6 +473,16 @@ pub fn on_tls_event(reason: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn patch_spec_parses_and_refuses_bad_entries() {
+        let p = parse_patches("0x23cf683:c70425:909090; 10:ab:cd").unwrap();
+        assert_eq!(p, vec![(0x23cf683, vec![0xc7, 0x04, 0x25], vec![0x90; 3]), (0x10, vec![0xab], vec![0xcd])]);
+        assert!(parse_patches("10:abcd:90").is_err(), "lengths differ");
+        assert!(parse_patches("10:abc:900").is_err(), "odd hex");
+        assert!(parse_patches("10:ab").is_err(), "missing new bytes");
+        assert!(parse_patches("").unwrap().is_empty());
+    }
 
     /// A PE32+ DLL of one section (.text at RVA 0x1000) holding `code`, its entry point at the
     /// start of it, preferred at `image_base` and relocatable (one empty block at RVA 0x1100);
