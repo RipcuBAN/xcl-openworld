@@ -4206,6 +4206,7 @@ impl Em {
             let _ = writeln!(h, "groupshared uint xcl_xs[{slots}];\ngroupshared uint xcl_xc[{counters}];\ngroupshared uint xcl_xw;");
             h.push_str("#define XCL_XS(i) xcl_xs[(i)]\n#define XCL_XC(i) xcl_xc[(i)]\n#define XCL_XW xcl_xw\n");
         }
+        push_spin_max(h);
         h.push_str(PRELUDE_X64);
     }
 
@@ -4221,6 +4222,7 @@ impl Em {
         } else {
             h.push_str("groupshared uint xcl_bar_alive_g;\ngroupshared uint xcl_bar_state_g;\n#define XCL_BAR_ALIVE xcl_bar_alive_g\n#define XCL_BAR_STATE xcl_bar_state_g\n");
         }
+        push_spin_max(h);
         h.push_str(PRELUDE_SAFE_BARRIER);
     }
 
@@ -5394,6 +5396,18 @@ uint dst_sel(uint4 c, uint sel, bool isint) { return select(sel == 0u, 0u, selec
 /// and take the same branches. Follows `PRELUDE` (`lane_id`, `xcl_half`); the emitter
 /// defines `XCL_X_SLOT` (words per exchange), `XCL_X_SPIN` and the storage `XCL_XS(i)` /
 /// `XCL_XC(i)` before it.
+/// Polls a spin wait (split-wave64 meet, safe `s_barrier`) makes before it gives up:
+/// `XCL_SPIN_MAX` (default 1 << 20). A GPU that takes longer than Windows' 2 s TDR to give up
+/// is removed (`DXGI_ERROR_DEVICE_HUNG`), so a lower bound trades a wrong result for a live device.
+fn spin_max() -> u32 {
+    static M: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *M.get_or_init(|| std::env::var("XCL_SPIN_MAX").ok().and_then(|v| v.trim().parse::<u32>().ok()).filter(|&n| n > 0).unwrap_or(1 << 20))
+}
+
+fn push_spin_max(h: &mut String) {
+    let _ = writeln!(h, "#ifndef XCL_SPIN_MAX\n#define XCL_SPIN_MAX {}u\n#endif", spin_max());
+}
+
 const PRELUDE_X64: &str = r#"
 // console wave in the group; exchanges so far (the same in both halves); lanes of the other
 // half (0: it does not exist – nothing to exchange with)
@@ -5445,7 +5459,7 @@ bool xcl_x_meet() {
             uint c;
             InterlockedAdd(XCL_XC(xcl_cw * 2u + (xcl_half ^ 1u)), 0u, c);
             if ((int)(c - need) >= 0) break;
-            if (n >= (1u << 20)) { ok = 0u; break; }
+            if (n >= XCL_SPIN_MAX) { ok = 0u; break; }
         }
     }
     if (WaveReadLaneFirst(ok) == 0u) { xcl_x_dead = true; return false; }
@@ -5534,7 +5548,7 @@ void xcl_s_barrier() {
                 InterlockedCompareExchange(XCL_BAR_STATE, _s, _next, _orig);
                 if (_orig == _s) break;
             }
-            if (_n >= (1u << 20)) {
+            if (_n >= XCL_SPIN_MAX) {
                 _ok = 0u;
                 uint _orig;
                 InterlockedAdd(XCL_BAR_ALIVE, 0xFFFFFFFFu, _orig);
