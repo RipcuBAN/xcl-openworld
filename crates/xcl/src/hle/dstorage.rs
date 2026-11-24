@@ -867,6 +867,7 @@ unsafe fn execute(r: &Request, file: Option<&FileInner>, dest_pages: Option<&[us
         }
     }
     if !r.dest_physical_pages() && !writable(r.destination as usize, n) {
+        warn_once("dest not writable", format_args!("virtual destination {:#x} ({n} bytes) is not writable", r.destination));
         return Err(E_ACCESS_VIOLATION);
     }
     let src: Vec<u8> = if r.memory_source() {
@@ -933,6 +934,10 @@ unsafe fn execute(r: &Request, file: Option<&FileInner>, dest_pages: Option<&[us
             pages
         };
         if !crate::hle::kernelx::write_physical_pages(pages, r.destination_page_offset as usize, &payload[..n]) {
+            warn_once("phys write failed", format_args!(
+                "writing {n} bytes to {} physical pages (offset {}, first {:#x}, {} zero) failed",
+                pages.len(), r.destination_page_offset, pages.first().copied().unwrap_or(0), pages.iter().filter(|&&p| p == 0).count()
+            ));
             return Err(E_ACCESS_VIOLATION);
         }
     } else if n > 0 {
